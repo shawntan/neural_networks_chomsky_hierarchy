@@ -371,7 +371,7 @@ class Transformer(hk.Module):
       attention = hk.LayerNorm(
           axis=-1, create_scale=True, create_offset=True)(
               attention)
-      h = jnn.relu(h)
+      h = jnn.gelu(h)
       h = hk.Linear(self._emb_dim)(h)
       h = hk.dropout(hk.next_rng_key(), self._dropout_prob, h)
       h = hk.LayerNorm(

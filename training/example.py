@@ -33,9 +33,10 @@ def main(unused_argv) -> None:
   batch_size = 128
   sequence_length = 40
   validation_sequence_length = 50  # Only used as a hint of performance.
-  task = 'even_pairs'
-  architecture = 'lstm'
-  architecture_params = {'hidden_size': 256}
+  task = 'parity_check'
+  architecture = 'transformer'
+  # architecture_params = {'hidden_size': 256}
+  architecture_params = {'vocab_size':4, 'num_layers': 8}
 
   # Create the task.
   curriculum = curriculum_lib.UniformCurriculum(
