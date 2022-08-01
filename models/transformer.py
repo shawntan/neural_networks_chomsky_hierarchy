@@ -360,23 +360,24 @@ class Transformer(hk.Module):
 
         h = embeddings
         for _ in range(self._num_layers):
-            attention = MultiHeadSelfAttention(
+            # TODO check MHSA has no ln
+            att = MultiHeadSelfAttention(
                 num_heads=self._num_heads,
                 hiddens_per_head=self._hiddens_per_head,
                 dropout_prob=self._dropout_prob,
                 positional_encodings=self._positional_encodings,
-                attention_window=self._attention_window)(
-                h)
-            attention = h + attention
-            attention = hk.LayerNorm(
-                axis=-1, create_scale=True, create_offset=True)(
-                attention)
+                attention_window=self._attention_window
+            )(hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h))
+            att = h + hk.dropout(hk.next_rng_key(), self._dropout_prob, att)
+
+            # FF
+            h = hk.Linear(2 * self._emb_dim)(
+                hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(att))
             h = jnn.relu(h)
             h = hk.Linear(self._emb_dim)(h)
             h = hk.dropout(hk.next_rng_key(), self._dropout_prob, h)
             h = hk.LayerNorm(
-                axis=-1, create_scale=True, create_offset=True)(
-                h + attention)
+                axis=-1, create_scale=True, create_offset=True)(h + att)
         return h
 
 
