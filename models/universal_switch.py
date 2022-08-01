@@ -266,17 +266,20 @@ class MultiHeadSelfAttention(hk.Module):
             x = hk.dropout(hk.next_rng_key(), self._dropout_prob, x)
 
         hiddens = self._hiddens_per_head * self._num_heads
-        q = hk.Linear(hiddens, with_bias=False)(x)
-        k = hk.Linear(hiddens, with_bias=False, name='k_params')(x)
-        v = hk.Linear(hiddens, with_bias=False)(x)
         new_shape = (batch_size, sequence_length, self._num_heads,
                      self._hiddens_per_head)
+
+        q = hk.Linear(hiddens, with_bias=False)(x)
         q = jnp.reshape(q, new_shape)
+
+        k = hk.Linear(hiddens, with_bias=False, name='k_params')(x)
         k = jnp.reshape(k, new_shape)
+
+        v = hk.Linear(hiddens, with_bias=False)(x)
         v = jnp.reshape(v, new_shape)
 
-        # In the following,
-        # b=batch_size, t=seq_len, h=num_heads, d=hiddens_per_head
+
+        # In the following, b=batch_size, t=seq_len, h=num_heads, d=hiddens_per_head
         if self._positional_encodings == PositionalEncodings.RELATIVE:
             attention = compute_attention_with_relative_encodings(q, k)
         else:
@@ -365,18 +368,15 @@ class Transformer(hk.Module):
                 hiddens_per_head=self._hiddens_per_head,
                 dropout_prob=self._dropout_prob,
                 positional_encodings=self._positional_encodings,
-                attention_window=self._attention_window)(
-                h)
+                attention_window=self._attention_window)(h)
             attention = h + attention
             attention = hk.LayerNorm(
-                axis=-1, create_scale=True, create_offset=True)(
-                attention)
+                axis=-1, create_scale=True, create_offset=True)(attention)
             h = jnn.relu(h)
             h = hk.Linear(self._emb_dim)(h)
             h = hk.dropout(hk.next_rng_key(), self._dropout_prob, h)
             h = hk.LayerNorm(
-                axis=-1, create_scale=True, create_offset=True)(
-                h + attention)
+                axis=-1, create_scale=True, create_offset=True)(h + attention)
         return h
 
 
