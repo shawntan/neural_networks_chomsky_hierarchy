@@ -16,6 +16,7 @@
 """Example script to train and evaluate a network."""
 
 from absl import app
+from absl import flags
 
 import haiku as hk
 import jax.numpy as jnp
@@ -30,7 +31,7 @@ from neural_networks_chomsky_hierarchy.training import utils
 def main(unused_argv) -> None:
   # Change your hyperparameters here. See constants.py for possible tasks and
   # architectures.
-  batch_size = 128
+  batch_size = 512
   sequence_length = 40
   validation_sequence_length = 50  # Only used as a hint of performance.
   task = 'parity_check'
@@ -98,4 +99,5 @@ def main(unused_argv) -> None:
 
 
 if __name__ == '__main__':
+    FLAGS = flags.FLAGS
   app.run(main)

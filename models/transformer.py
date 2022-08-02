@@ -305,7 +305,6 @@ class Transformer(hk.Module):
 
     def __init__(
             self,
-            vocab_size: int,
             embedding_dim: int = 128,
             num_layers: int = 2,
             num_heads: int = 8,
@@ -335,7 +334,6 @@ class Transformer(hk.Module):
           name: The name of the module.
         """
         super().__init__(name=name)
-        self._num_vocab = vocab_size
         self._emb_dim = embedding_dim
         self._num_layers = num_layers
         self._num_heads = num_heads
@@ -353,8 +351,7 @@ class Transformer(hk.Module):
         if self._use_embeddings:
             embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
             embeddings = hk.Linear(
-                self._emb_dim, with_bias=False, w_init=embs_init)(
-                x)
+                self._emb_dim, with_bias=False, w_init=embs_init)(x)
         else:
             embeddings = x
 
@@ -367,17 +364,16 @@ class Transformer(hk.Module):
                 dropout_prob=self._dropout_prob,
                 positional_encodings=self._positional_encodings,
                 attention_window=self._attention_window
-            )(hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h))
+            )(h)
             att = h + hk.dropout(hk.next_rng_key(), self._dropout_prob, att)
-
             # FF
             h = hk.Linear(2 * self._emb_dim)(
-                hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(att))
+                hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(att)
+            )
             h = jnn.relu(h)
             h = hk.Linear(self._emb_dim)(h)
             h = hk.dropout(hk.next_rng_key(), self._dropout_prob, h)
-            h = hk.LayerNorm(
-                axis=-1, create_scale=True, create_offset=True)(h + att)
+            h = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h + att)
         return h
 
 
@@ -392,7 +388,6 @@ def make_transformer(
         dropout_prob: float = 0.1,
         is_training: bool = True) -> Callable[[jnp.ndarray], jnp.ndarray]:
     """Returns a transformer model."""
-
     def transformer(x):
         output = Transformer(
             vocab_size=vocab_size,
@@ -405,5 +400,4 @@ def make_transformer(
         if not return_all_outputs:
             output = output[:, -1, :]
         return hk.Linear(output_size)(output)
-
     return transformer
