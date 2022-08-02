@@ -17,210 +17,90 @@
 
 import enum
 from typing import Callable, Optional, Tuple
-from .attention import MultiHeadAttention
-
+from transformer import PositionalEncodings, layer_norm
 import haiku as hk
 import jax.nn as jnn
 import jax.numpy as jnp
 import jax
-
-_INF_LOGITS = 10000
-
-def layer_norm(x: jnp.ndarray) -> jnp.ndarray:
-    """Applies a unique LayerNorm to x with default settings."""
-    ln = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
-    return ln(x)
-
-class PositionalEncodings(enum.Enum):
-    NONE = 0
-    SIN_COS = 1
-    ALIBI = 2
-    RELATIVE = 3
+import numpy as np
+from moe import MixtureOfExperts
 
 
-def sin_cos_positional_encodings(sequence_length: int,
-                                 embedding_size: int,
-                                 with_negative: bool = False,
-                                 max_time: float = 10000.0) -> jnp.ndarray:
-    """Generates positional encodings for the input.
+class MultiHeadAttention(hk.Module):
+    """Multi-headed attention mechanism.
 
-    Args:
-      sequence_length: The length of the output sequence.
-      embedding_size: The size of the embedding to consider. Must be even.
-      with_negative: Whether to also compute values before 0 (useful for
-        shifting).
-      max_time: (default 10000) Constant used to scale position by in the
-        encodings.
-    Returns:
-      A tensor of size [seq_len, emb_size].
-
-    Raises:
-      ValueError if embedding_size is odd.
+    As described in the vanilla Transformer paper:
+      "Attention is all you need" https://arxiv.org/abs/1706.03762
     """
-    if embedding_size % 2 == 1:
-        raise ValueError(
-            'Embedding sizes must be even if using positional encodings.')
 
-    # Generate a sequence of positions and frequencies.
-    if not with_negative:
-        pos = jnp.arange(0, sequence_length, dtype=jnp.float32)
-    else:
-        pos = jnp.arange(-sequence_length + 1, sequence_length, dtype=jnp.float32)
-    freqs = jnp.arange(0, embedding_size, 2, dtype=jnp.float32)
-    inverse_freqs = 1.0 / (max_time ** (freqs / embedding_size))
+    def __init__(
+            self,
+            num_experts: int, top_k: int,
+            key_size: int,
+            model_size: int,
+            # TODO(romanring, tycai): migrate to a more generic `w_init` initializer.
+            w_init_scale: float,
+            value_size: Optional[int] = None,
+            name: Optional[str] = None,
+    ):
+        super().__init__(name=name)
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.key_size = key_size
+        self.value_size = key_size
+        self.model_size = model_size
+        self.w_init = hk.initializers.VarianceScaling(w_init_scale)
 
-    # We combine [seq_len] and [emb_size / 2] to [seq_len, emb_size / 2].
-    pos_emb = jnp.einsum('i,j->ij', pos, inverse_freqs)
-    return jnp.concatenate([jnp.sin(pos_emb), jnp.cos(pos_emb)], -1)
+    def __call__(
+            self,
+            query: jnp.ndarray,
+            key: jnp.ndarray,
+            value: jnp.ndarray,
+            mask: Optional[jnp.ndarray] = None,
+    ) -> jnp.ndarray:
+        """Compute (optionally masked) MHA with queries, keys & values."""
+        key_heads = self._linear_projection(self.key_size, "key")(key)
+        value_heads = self._linear_projection(self.value_size, "value")(value)
+        query_experts = [self._linear_projection(self.key_size, "query_%d" % i)
+                         for i in range(self.num_experts)]
+        moe = MixtureOfExperts(num_experts=self.num_experts, k=self.top_k,
+                               name="query_moe")
 
+        query_flat = jnp.reshape(query, (-1, query.shape[-1]))
+        top_k_gates, top_k_idxs = moe.route(query_flat)
+        idxs, sharded_query = moe.map(top_k_idxs, query_flat)
+        sharded_query = moe.apply_experts(sharded_query, query_experts)
+        query_heads_flat = moe.gather(query_flat.shape[0], idxs, sharded_query)
+        query_heads = jnp.reshape(query_heads_flat, (*query.shape[:-1], self.top_k, -1))
 
-def _fixed_encodings_to_relative(encodings: jnp.ndarray) -> jnp.ndarray:
-    """Returns a matrix of shifted encodings.
+        attn_logits = jnp.einsum("...thd,...Td->...htT", query_heads, key_heads)
+        sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
+        attn_logits = attn_logits / sqrt_key_size
+        if mask is not None:
+            if mask.ndim != attn_logits.ndim:
+                raise ValueError(f"Mask dimensionality {mask.ndim} must match logits "
+                                 f"{attn_logits.ndim}.")
+            attn_logits = jnp.where(mask, attn_logits, -1e30)
 
-    If the input is [[-2], [-1], [0], [1], [2]], the output will be
-      [[[0], [1], [2]]
-       [[-1], [0], [1]]
-       [[-2], [-1], [0]]]
+        attn_weights = jax.nn.softmax(attn_logits)
+        # Concatenate attention matrix of all heads into a single vector.
+        # attn_vec = jnp.reshape(attn, (*query.shape[:-1], -1))
 
-    Args:
-      encodings: A tensor of encodings, of shape (length, encoding_size).
+        attn = jnp.einsum("...htT,...Thd->...thd", attn_weights, value_heads)
+        attn_experts = [hk.Linear(self.model_size, w_init=self.w_init,
+                                  name="attn_expert_%d" % i)
+                        for i in range(self.num_experts)]
+        attn_flat = jnp.reshape(attn, (-1, attn.shape[-1]))
+        idxs, sharded_attn = moe.map(top_k_idxs, attn_flat)
+        sharded_out = moe.apply_experts(sharded_attn, attn_experts)
+        out_flat = moe.reduce(attn.shape[0], idxs, sharded_out, top_k_gates)
+        out = jnp.reshape(out_flat, (*query.shape[:-1], -1))
+        return out
 
-    Returns:
-      A tensor of shifted encodings, of shape
-      (length//2+1, length//2+1, encoding_size).
-    Raises:
-      ValueError if encodings is not in dimension 2.
-    """
-    if encodings.ndim != 2:
-        raise ValueError('`logits` needs to be an array of dimension 2.')
-    sequence_length, num_hiddens = encodings.shape
-    if sequence_length == 1:
-        return jnp.expand_dims(encodings, axis=0)
-    sequence_length = sequence_length // 2 + 1
-    index_matrix = jnp.sum(
-        jnp.stack([
-            k * jnp.eye(sequence_length, sequence_length, k=k, dtype=jnp.int32)
-            for k in range(1, sequence_length)
-        ]),
-        axis=0)
-    index_matrix = index_matrix - jnp.transpose(index_matrix)
-    index_matrix += sequence_length - 1
-    shifted = jnp.take(
-        encodings, jnp.reshape(index_matrix, (sequence_length ** 2,)), axis=0)
-    return jnp.reshape(shifted, (sequence_length, sequence_length, num_hiddens))
+    @hk.transparent
+    def _linear_projection(self, head_size: int, name: Optional[str] = None):
+        return hk.Linear(head_size, w_init=self.w_init, name=name)
 
-
-def compute_attention_with_relative_encodings(queries: jnp.ndarray,
-                                              keys: jnp.ndarray) -> jnp.ndarray:
-    """Returns attention with relative positional encodings.
-
-    This code strictly follows what is described in the TransformerXL paper.
-    https://arxiv.org/pdf/1901.02860.pdf
-
-    Args:
-      queries: The queries used for attention. Shape (b, t, h, d).
-      keys: The keys used for attention. Shape (b, t, h, d').
-
-    Returns:
-      The attention logits. Shape (b, h, t, t).
-    """
-    sequence_length, num_heads, num_hiddens = queries.shape[-3:]
-
-    #  First compute the content logits.
-    content_bias = hk.get_parameter(
-        name='relpos_contentbias',
-        shape=[num_heads, num_hiddens],
-        init=hk.initializers.RandomNormal(stddev=0.02))
-    content_logits = jnp.einsum('bthd,bThd->bhtT', queries + content_bias, keys)
-
-    #  Then compute the relative part.
-    relative_bias = hk.get_parameter(
-        name='relpos_relativebias',
-        shape=[num_heads, num_hiddens],
-        init=hk.initializers.RandomNormal(stddev=0.02))
-    sin_cos = sin_cos_positional_encodings(
-        sequence_length, num_hiddens, with_negative=True)
-    shifted_sin_cos = _fixed_encodings_to_relative(sin_cos)
-    relative_keys = hk.Linear(num_hiddens, name='k_params')(shifted_sin_cos)
-    relative_logits = jnp.einsum('bthd,Ttd->bhtT', queries + relative_bias,
-                                 relative_keys)  # No need to broadcast batch.
-    return content_logits + relative_logits
-
-
-def compute_alibi_encodings_biases(
-        attention_shape: Tuple[int, int, int, int]) -> jnp.ndarray:
-    """Returns the biases following the ALiBi method.
-
-    This code strictly follows what is described in the ALiBi paper.
-    https://arxiv.org/pdf/2108.12409.pdf
-
-    Args:
-      attention_shape: The attention logits shape. Shape (b, h, t, t).
-
-    Returns:
-      The alibi biases, same shape as the input logits shape.
-    """
-    batch_size, num_heads, sequence_length, _ = attention_shape
-
-    base_coeff = 2 ** (-8 / num_heads)
-    # Coeffs tensor of shape (h, 1, 1).
-    coeffs = jnp.array([base_coeff ** i for i in range(1, num_heads + 1)])
-    coeffs = jnp.expand_dims(coeffs, -1)
-    coeffs = jnp.expand_dims(coeffs, -1)
-
-    # Biases tensor of shape (h, t, t).
-    #  The upper part of the matrix is not zero like in the paper because we
-    # don't use causal attention.
-    if sequence_length == 1:
-        biases = jnp.zeros((1, 1))
-    else:
-        biases = jnp.sum(
-            jnp.stack([
-                k * jnp.eye(sequence_length, sequence_length, k=k)
-                for k in range(1, sequence_length)
-            ]),
-            axis=0)
-        biases -= jnp.transpose(biases)
-        biases = jnp.stack([biases] * num_heads, axis=0)
-
-    #  Multiply the biases with the coeffs, and batch the resulting tensor.
-    biases = coeffs * biases
-    return jnp.stack([biases] * batch_size, axis=0)
-
-
-def compute_sliding_window_mask(sequence_length: int,
-                                attention_window: int) -> jnp.ndarray:
-    """Returns a k-diagonal mask for a sliding window.
-
-    Args:
-      sequence_length: The length of the sequence, which will determine the shape
-        of the output.
-      attention_window: The size of the sliding window.
-
-    Returns:
-      A symmetric matrix of shape (sequence_length, sequence_length),
-      attention_window-diagonal, with ones on the diagonal and on all the
-      upper/lower diagonals up to attention_window // 2.
-
-    Raises:
-      ValueError if attention_window is <= 0.
-    """
-    if attention_window <= 0:
-        raise ValueError(
-            f'The attention window should be > 0. Got {attention_window}.')
-
-    if attention_window == 1:
-        return jnp.eye(sequence_length, sequence_length)
-
-    attention_mask = jnp.sum(
-        jnp.stack([
-            jnp.eye(sequence_length, sequence_length, k=k, dtype=jnp.int32)
-            for k in range(1, attention_window // 2 + 1)
-        ]),
-        axis=0)
-    attention_mask += jnp.transpose(attention_mask)
-    attention_mask += jnp.eye(sequence_length, sequence_length)
-    return attention_mask
 
 class Transformer(hk.Module):
     """Transformer tower."""
@@ -279,8 +159,9 @@ class Transformer(hk.Module):
             embeddings = x
 
         # First the attention block.
-        attn_block = hk.MultiHeadAttention(
-            num_heads=self._num_heads,
+        attn_block = MultiHeadAttention(
+            num_experts=self._num_heads * self._num_layers,
+            top_k=self._num_heads,
             key_size=self._hiddens_per_head,
             model_size=self._emb_dim,
             w_init_scale=2 / self._num_layers
@@ -292,10 +173,8 @@ class Transformer(hk.Module):
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
-
         h = embeddings
         for _ in range(self._num_layers):
-
             h_norm = layer_norm(h)
             h_attn = attn_block(h_norm, h_norm, h_norm)
             h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
@@ -317,6 +196,7 @@ def make_transformer(
         dropout_prob: float = 0.1,
         is_training: bool = True) -> Callable[[jnp.ndarray], jnp.ndarray]:
     """Returns a transformer model."""
+
     def transformer(x):
         output = Transformer(
             num_layers=num_layers,
@@ -328,4 +208,5 @@ def make_transformer(
         if not return_all_outputs:
             output = output[:, -1, :]
         return hk.Linear(output_size)(output)
+
     return transformer
