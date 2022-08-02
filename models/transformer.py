@@ -21,9 +21,14 @@ from typing import Callable, Optional, Tuple
 import haiku as hk
 import jax.nn as jnn
 import jax.numpy as jnp
+import jax
 
 _INF_LOGITS = 10000
 
+def layer_norm(x: jnp.ndarray) -> jnp.ndarray:
+    """Applies a unique LayerNorm to x with default settings."""
+    ln = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
+    return ln(x)
 
 class PositionalEncodings(enum.Enum):
     NONE = 0
@@ -216,90 +221,6 @@ def compute_sliding_window_mask(sequence_length: int,
     attention_mask += jnp.eye(sequence_length, sequence_length)
     return attention_mask
 
-
-class MultiHeadSelfAttention(hk.Module):
-    """Classical attention module, using multiple heads."""
-
-    def __init__(
-            self,
-            num_heads: int,
-            hiddens_per_head: int,
-            positional_encodings: PositionalEncodings,
-            attention_window: Optional[int] = None,
-            dropout_prob: float = 0.,
-            name: Optional[str] = None,
-    ):
-        """Initializes the attention module.
-
-        Args:
-          num_heads: Number of heads to use.
-          hiddens_per_head: Number of hidden neurons per head.
-          positional_encodings: Which positional encodings to use in the attention.
-          attention_window: Size of the attention sliding window. None means no
-            sliding window is used (or equivalently, window=full_attention_length).
-            We attend only on attention_window tokens around a given query token. We
-            attend to tokens before AND after the query token. If attention_window
-            is even, we use the value +1.
-          dropout_prob: Probability of dropout. Must be between 0 and 1.
-          name: Name of the module.
-
-        Raises:
-          ValueError if dropout_prob is outside of [0, 1].
-        """
-        super().__init__(name=name)
-        self._num_heads = num_heads
-        self._hiddens_per_head = hiddens_per_head
-        if not 0 <= dropout_prob <= 1:
-            raise ValueError(f'dropout_prob should be in [0, 1]. Got {dropout_prob}.')
-        self._dropout_prob = dropout_prob
-        self._positional_encodings = positional_encodings
-        self._attention_window = attention_window
-
-    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
-        """Returns the output of the multi-head attention."""
-        batch_size, sequence_length, embedding_size = x.shape
-
-        if self._positional_encodings == PositionalEncodings.SIN_COS:
-            x += sin_cos_positional_encodings(sequence_length, embedding_size)
-
-        if self._dropout_prob > 0:
-            x = hk.dropout(hk.next_rng_key(), self._dropout_prob, x)
-
-        hiddens = self._hiddens_per_head * self._num_heads
-        q = hk.Linear(hiddens, with_bias=False)(x)
-        k = hk.Linear(hiddens, with_bias=False, name='k_params')(x)
-        v = hk.Linear(hiddens, with_bias=False)(x)
-        new_shape = (batch_size, sequence_length, self._num_heads,
-                     self._hiddens_per_head)
-        q = jnp.reshape(q, new_shape)
-        k = jnp.reshape(k, new_shape)
-        v = jnp.reshape(v, new_shape)
-
-        # In the following,
-        # b=batch_size, t=seq_len, h=num_heads, d=hiddens_per_head
-        if self._positional_encodings == PositionalEncodings.RELATIVE:
-            attention = compute_attention_with_relative_encodings(q, k)
-        else:
-            attention = jnp.einsum('bthd,bThd->bhtT', q, k)
-            if self._positional_encodings == PositionalEncodings.ALIBI:
-                attention += compute_alibi_encodings_biases(attention.shape)
-        attention *= 1. / jnp.sqrt(hiddens)
-
-        if self._attention_window is not None:
-            # We compute the sliding attention by just applying a mask on the values
-            # that are outside our window.
-            attention_mask = compute_sliding_window_mask(sequence_length,
-                                                         self._attention_window)
-            attention_mask = -_INF_LOGITS * (1 - attention_mask)
-            attention = attention_mask + attention
-
-        normalized_attention = jnn.softmax(attention)
-
-        output = jnp.einsum('bhtT,bThd->bthd', normalized_attention, v)
-        output = jnp.reshape(output, (batch_size, sequence_length, hiddens))
-        return hk.Linear(embedding_size)(output)
-
-
 class Transformer(hk.Module):
     """Transformer tower."""
 
@@ -348,6 +269,7 @@ class Transformer(hk.Module):
 
     def __call__(self, x: jnp.ndarray, is_training: bool = True):
         """Returns the transformer tower output, shape [B, T, E]."""
+        initializer = hk.initializers.VarianceScaling(2 / self._num_layers)
         if self._use_embeddings:
             embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
             embeddings = hk.Linear(
@@ -357,28 +279,33 @@ class Transformer(hk.Module):
 
         h = embeddings
         for _ in range(self._num_layers):
-            # TODO check MHSA has no ln
-            att = MultiHeadSelfAttention(
+            # First the attention block.
+            attn_block = hk.MultiHeadAttention(
                 num_heads=self._num_heads,
-                hiddens_per_head=self._hiddens_per_head,
-                dropout_prob=self._dropout_prob,
-                positional_encodings=self._positional_encodings,
-                attention_window=self._attention_window
-            )(h)
-            att = h + hk.dropout(hk.next_rng_key(), self._dropout_prob, att)
-            # FF
-            h = hk.Linear(2 * self._emb_dim)(
-                hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(att)
+                key_size=self._hiddens_per_head,
+                model_size=self._emb_dim,
+                w_init_scale=2 / self._num_layers
             )
-            h = jnn.relu(h)
-            h = hk.Linear(self._emb_dim)(h)
-            h = hk.dropout(hk.next_rng_key(), self._dropout_prob, h)
-            h = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h + att)
-        return h
+            # Then the dense block.
+            dense_block = hk.Sequential([
+                hk.Linear(2 * self._emb_dim, w_init=initializer),
+                jnn.gelu,
+                hk.Linear(self._emb_dim, w_init=initializer),
+            ])
+
+            h_norm = layer_norm(h)
+            h_attn = attn_block(h_norm, h_norm, h_norm)
+            h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
+            h = h + h_attn
+            h_norm = layer_norm(h)
+            h_dense = dense_block(h_norm)
+            h_dense = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_dense)
+            h = h + h_dense
+
+        return layer_norm(h)
 
 
 def make_transformer(
-        vocab_size: int,
         num_layers: int,
         output_size: int,
         return_all_outputs: bool = False,
@@ -390,7 +317,6 @@ def make_transformer(
     """Returns a transformer model."""
     def transformer(x):
         output = Transformer(
-            vocab_size=vocab_size,
             num_layers=num_layers,
             embedding_dim=embedding_dim,
             positional_encodings=positional_encodings,

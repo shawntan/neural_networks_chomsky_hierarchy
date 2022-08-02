@@ -65,7 +65,8 @@ MODEL_BUILDERS = {
         functools.partial(
             rnn.make_rnn, rnn_core=stack_rnn.StackRNNCore, inner_core=hk.LSTM),
     'transformer':
-        transformer.make_transformer,
+        functools.partial(
+            transformer.make_transformer, num_layers=8),
     'tape_rnn':
         functools.partial(
             rnn.make_rnn,
