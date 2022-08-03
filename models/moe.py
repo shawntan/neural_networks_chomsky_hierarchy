@@ -10,50 +10,59 @@ class MixtureOfExperts(hk.Module):
         self._num_experts = num_experts
         self._k = k
 
-    def route(self, x:jnp.ndarray):
+    def route(self, x: jnp.ndarray):
         logits = hk.Linear(self._num_experts)(x)
         top_k_vals, top_k_idxs = jax.lax.top_k(logits, self._k)
         top_k_gates = jax.nn.softmax(top_k_vals, axis=-1)
         return top_k_gates, top_k_idxs
 
-    def map(self, top_k_idxs:jnp.ndarray, x:jnp.ndarray)\
-            -> Tuple[List[jnp.ndarray], List[jnp.ndarray]]:
-        # total_counts, embedding_size = x.shape
-        expert_idxs = jnp.arange(self._num_experts, dtype=np.int32)
-        top_k_mask = expert_idxs[:, None, None] == top_k_idxs[None, :, :]
-        sharded_x = [None] * self._num_experts
-        idxs = [None] * self._num_experts
-        for i in range(self._num_experts):
-            idxs[i] = source_idx, slot_idx = jnp.where(top_k_mask[i])
-            sharded_x[i] = x[source_idx]
-        return idxs, sharded_x
+    def distribute_map(self, x: jnp.ndarray, top_k_idxs: jnp.ndarray, experts: List[Callable]) -> jnp.ndarray:
+        def expert_map_i(x_i, top_k_idxs_i):
+            def expert_map_ij(top_k_idxs_ij):
+                if hk.running_init():
+                    for f in experts:
+                        out = f(x_i)
+                else:
+                    out = hk.switch(top_k_idxs_ij, experts, x_i)
+                return out
+            return hk.vmap(expert_map_ij, split_rng=(not hk.running_init()))(top_k_idxs_i)
+        return hk.vmap(expert_map_i, split_rng=(not hk.running_init()))(x, top_k_idxs)
 
-    def apply_experts(self, sharded_y, experts):
-        return jax.tree_util.tree_map(lambda f,x: f(x), experts, sharded_y)
+    def map(self, x: jnp.ndarray, top_k_idxs: jnp.ndarray, experts: List[Callable]) -> jnp.ndarray:
+        def expert_map_i(x_i, top_k_idxs_i):
+            def expert_map_ij(x_ij, top_k_idxs_ij):
+                if hk.running_init():
+                    for f in experts:
+                        out = f(x_ij)
+                else:
+                    out = hk.switch(top_k_idxs_ij, experts, x_ij)
+                return out
+            return hk.vmap(expert_map_ij, split_rng=(not hk.running_init()))(x_i, top_k_idxs_i)
+        return hk.vmap(expert_map_i, split_rng=(not hk.running_init()))(x, top_k_idxs)
 
-    def gather(self, in_shape, idxs, sharded_y):
-        out_buf = jnp.empty((in_shape, self._k, sharded_y[0].shape[-1]),
-                            dtype=sharded_y[0].dtype)
-        for i in range(self._num_experts):
-            out_buf = out_buf.at[idxs[i]].set(sharded_y[i])
-        return out_buf
-
-    def reduce(self, in_shape, idxs, sharded_y, top_k_gates):
-        out_buf = jnp.empty((in_shape, sharded_y[0].shape[-1]), dtype=sharded_y[0].dtype)
-        for i in range(self._num_experts):
-            source_idx, slot_idx = idxs[i]
-            out_buf = out_buf.at[source_idx].add(
-                top_k_gates[source_idx, slot_idx][:, None] * sharded_y[i])
-        return out_buf
+    def weighted_reduce(self, x, top_k_gates):
+        return jnp.einsum('...kd,...k->...d', x, top_k_gates)
 
 if __name__ == "__main__":
+
     def moe(x):
         num_experts = 4
-        experts = [hk.Linear(7) for i in range(num_experts)] 
+        experts_query = [hk.Linear(7) for i in range(num_experts)]
         moe = MixtureOfExperts(num_experts, k=2)
         top_k_gates, top_k_idxs = moe.route(x)
-        idxs, sharded_x = moe.map(top_k_idxs, x)
-        sharded_outs = moe.apply_experts(sharded_x, experts)
-        return moe.reduce(x.shape[0], idxs, sharded_outs, top_k_gates)
+        q = moe.distribute_map(x, top_k_idxs, experts_query)
+        mid_out = moe.map(q, top_k_idxs, [hk.Linear(8) for i in range(num_experts)] )
+        out = moe.weighted_reduce(mid_out, top_k_gates)
+        return out
 
     forward_moe = hk.transform(moe)
+    key = jax.random.PRNGKey(0)
+    x = jax.random.normal(key, (2000, 20))
+    # print(x)
+    rng_key = jax.random.PRNGKey(42)
+    params = forward_moe.init(rng=rng_key, x=x)
+    fn_apply = jax.jit(forward_moe.apply)
+    out_buf = fn_apply(params=params, x=x, rng=rng_key)
+    print(out_buf.shape)
+    out_buf = fn_apply(params=params, x=x, rng=rng_key)
+    print(out_buf.shape)

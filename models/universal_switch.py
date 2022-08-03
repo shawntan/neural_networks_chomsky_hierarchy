@@ -68,10 +68,13 @@ class MultiHeadAttention(hk.Module):
 
         query_flat = jnp.reshape(query, (-1, query.shape[-1]))
         top_k_gates, top_k_idxs = moe.route(query_flat)
-        idxs, sharded_query = moe.map(top_k_idxs, query_flat)
-        sharded_query = moe.apply_experts(sharded_query, query_experts)
-        query_heads_flat = moe.gather(query_flat.shape[0], idxs, sharded_query)
-        query_heads = jnp.reshape(query_heads_flat, (*query.shape[:-1], self.top_k, -1))
+        query_heads_flat = moe.distribute_map(
+            query_flat, top_k_idxs,
+            experts=[self._linear_projection(self.key_size, "query_%d" % i)
+                     for i in range(self.num_experts)]
+        )
+        query_heads = jnp.reshape(query_heads_flat,
+                                  (*query.shape[:-1], self.top_k, -1))
 
         attn_logits = jnp.einsum("...thd,...Td->...htT", query_heads, key_heads)
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
@@ -81,19 +84,18 @@ class MultiHeadAttention(hk.Module):
                 raise ValueError(f"Mask dimensionality {mask.ndim} must match logits "
                                  f"{attn_logits.ndim}.")
             attn_logits = jnp.where(mask, attn_logits, -1e30)
-
         attn_weights = jax.nn.softmax(attn_logits)
         # Concatenate attention matrix of all heads into a single vector.
         # attn_vec = jnp.reshape(attn, (*query.shape[:-1], -1))
 
         attn = jnp.einsum("...htT,...Thd->...thd", attn_weights, value_heads)
-        attn_experts = [hk.Linear(self.model_size, w_init=self.w_init,
-                                  name="attn_expert_%d" % i)
-                        for i in range(self.num_experts)]
         attn_flat = jnp.reshape(attn, (-1, attn.shape[-1]))
-        idxs, sharded_attn = moe.map(top_k_idxs, attn_flat)
-        sharded_out = moe.apply_experts(sharded_attn, attn_experts)
-        out_flat = moe.reduce(attn.shape[0], idxs, sharded_out, top_k_gates)
+        attn_out_flat = moe.map(
+            attn_flat, top_k_idxs,
+            experts=[hk.Linear(self.model_size, w_init=self.w_init,name="attn_expert_%d" % i)
+                     for i in range(self.num_experts)]
+        )
+        out_flat = moe.weighted_reduce(attn_out_flat, top_k_gates)
         out = jnp.reshape(out_flat, (*query.shape[:-1], -1))
         return out
 
