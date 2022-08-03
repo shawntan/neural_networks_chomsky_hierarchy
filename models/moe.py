@@ -1,7 +1,7 @@
 import jax
 import jax.numpy as jnp
 import haiku as hk
-from numpy import np
+import numpy as np
 from typing import Callable, Optional, Tuple, List
 
 class MixtureOfExperts(hk.Module):
