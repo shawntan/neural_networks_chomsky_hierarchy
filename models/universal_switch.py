@@ -17,13 +17,13 @@
 
 import enum
 from typing import Callable, Optional, Tuple
-from transformer import PositionalEncodings, layer_norm
+from .transformer import PositionalEncodings, layer_norm
 import haiku as hk
 import jax.nn as jnn
 import jax.numpy as jnp
 import jax
 import numpy as np
-from moe import MixtureOfExperts
+from .moe import MixtureOfExperts
 
 
 class MultiHeadAttention(hk.Module):
