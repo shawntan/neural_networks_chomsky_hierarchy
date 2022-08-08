@@ -29,6 +29,7 @@ from neural_networks_chomsky_hierarchy.models import stack_rnn
 from neural_networks_chomsky_hierarchy.models import tape_rnn
 from neural_networks_chomsky_hierarchy.models import transformer
 from neural_networks_chomsky_hierarchy.models import universal_switch
+from neural_networks_chomsky_hierarchy.models import universal_transformer
 from neural_networks_chomsky_hierarchy.tasks.cs import binary_addition
 from neural_networks_chomsky_hierarchy.tasks.cs import duplicate_string
 from neural_networks_chomsky_hierarchy.tasks.cs import interlocked_pairing
@@ -68,6 +69,9 @@ MODEL_BUILDERS = {
     'transformer':
         functools.partial(
             transformer.make_transformer, num_layers=8),
+    'universal_transformer':
+        functools.partial(
+            universal_transformer.make_transformer, num_layers=8),
     'universal_switch':
         functools.partial(
             universal_switch.make_transformer, num_layers=8),

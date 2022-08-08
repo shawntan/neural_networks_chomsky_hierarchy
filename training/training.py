@@ -24,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 import tqdm
+import pickle
 
 from neural_networks_chomsky_hierarchy.training import range_evaluation
 
@@ -117,7 +118,8 @@ def loop(
         params=params,
         rng_key=next(rng_seq),
         opt_state=opt_state,
-        batch=train_batch)
+        batch=train_batch
+    )
 
     eval_freq = training_params.eval_frequency
     if eval_freq > 0 and step % eval_freq == 0:
@@ -126,6 +128,7 @@ def loop(
       (valid_loss,
        valid_metrics) = training_params.loss_fn(valid_outputs,
                                                 valid_batch["output"])
+      # pickle.dump(params, open('current_checkpoint.jx', 'wb'))
 
       log_data = {
           "train_loss": float(train_loss),
@@ -152,6 +155,8 @@ def loop(
       print(log_data)
       training_results.append(log_data)
 
+  params = pickle.load(open('current_checkpoint.jx', 'rb'))
+  print(params)
   # Evaluation over all lengths just after training.
   evaluation_results = None
   if training_params.compute_full_range_test:
