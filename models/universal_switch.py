@@ -81,8 +81,10 @@ class MultiHeadAttention(hk.Module):
         attn_logits = attn_logits / sqrt_key_size
         if mask is not None:
             if mask.ndim != attn_logits.ndim:
-                raise ValueError(f"Mask dimensionality {mask.ndim} must match logits "
-                                 f"{attn_logits.ndim}.")
+                raise ValueError(
+                    f"Mask dimensionality {mask.ndim} must match logits "
+                    f"{attn_logits.ndim}."
+                )
             attn_logits = jnp.where(mask, attn_logits, -1e30)
         attn_weights = jax.nn.softmax(attn_logits)
         # Concatenate attention matrix of all heads into a single vector.
@@ -92,7 +94,8 @@ class MultiHeadAttention(hk.Module):
         attn_flat = jnp.reshape(attn, (-1, attn.shape[-1]))
         attn_out_flat = moe.map(
             attn_flat, top_k_idxs,
-            experts=[hk.Linear(self.model_size, w_init=self.w_init,name="attn_expert_%d" % i)
+            experts=[hk.Linear(self.model_size,
+                               w_init=self.w_init, name="attn_expert_%d" % i)
                      for i in range(self.num_experts)]
         )
         out_flat = moe.weighted_reduce(attn_out_flat, top_k_gates)
