@@ -125,14 +125,14 @@ def compute_attention_with_relative_encodings(queries: jnp.ndarray,
     """
     sequence_length, num_heads, num_hiddens = queries.shape[-3:]
 
-    #  First compute the content logits.
+    # First compute the content logits.
     content_bias = hk.get_parameter(
         name='relpos_contentbias',
         shape=[num_heads, num_hiddens],
         init=hk.initializers.RandomNormal(stddev=0.02))
     content_logits = jnp.einsum('bthd,bThd->bhtT', queries + content_bias, keys)
 
-    #  Then compute the relative part.
+    # Then compute the relative part.
     relative_bias = hk.get_parameter(
         name='relpos_relativebias',
         shape=[num_heads, num_hiddens],
