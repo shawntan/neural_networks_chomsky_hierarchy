@@ -24,7 +24,9 @@ import jax.numpy as jnp
 import jax
 import numpy as np
 
-from .transformer import compute_attention_with_relative_encodings
+from .transformer import \
+        compute_attention_with_relative_encodings, \
+        sin_cos_positional_encodings
 from .transformer import PositionalEncodings
 
 _INF_LOGITS = 10000
@@ -67,6 +69,7 @@ class MultiHeadAttention(hk.Module):
 
         attn_logits = \
             compute_attention_with_relative_encodings(query_heads, key_heads)
+
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
         attn_logits = attn_logits / sqrt_key_size
 
@@ -144,12 +147,10 @@ class Transformer(hk.Module):
     def __call__(self, x: jnp.ndarray, is_training: bool = True):
         """Returns the transformer tower output, shape [B, T, E]."""
         initializer = hk.initializers.VarianceScaling(2 / self._num_layers)
-        if self._use_embeddings:
-            embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
-            embeddings = hk.Linear(
-                self._emb_dim, with_bias=False, w_init=embs_init)(x)
-        else:
-            embeddings = x
+        embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
+        embeddings = hk.Linear(self._emb_dim, with_bias=False, w_init=embs_init)(x)
+        batch_size, sequence_length , embedding_size = embeddings.shape
+        # embeddings += sin_cos_positional_encodings(sequence_length, embedding_size)
 
         ln1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
         # First the attention block.

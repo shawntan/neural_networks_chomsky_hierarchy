@@ -270,15 +270,15 @@ class Transformer(hk.Module):
     def __call__(self, x: jnp.ndarray, is_training: bool = True):
         """Returns the transformer tower output, shape [B, T, E]."""
         initializer = hk.initializers.VarianceScaling(2 / self._num_layers)
-        if self._use_embeddings:
-            embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
-            embeddings = hk.Linear(
-                self._emb_dim, with_bias=False, w_init=embs_init)(x)
-        else:
-            embeddings = x
+        embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
+        embeddings = hk.Linear(self._emb_dim, with_bias=False, w_init=embs_init)(x)
+        batch_size, sequence_length , embedding_size = embeddings.shape
+        # embeddings += sin_cos_positional_encodings(sequence_length, embedding_size)
 
-        h = embeddings
-        for _ in range(self._num_layers):
+
+
+        def trnsfrm_block(i, h):
+            ln1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
             # First the attention block.
             attn_block = hk.MultiHeadAttention(
                 num_heads=self._num_heads,
@@ -286,23 +286,27 @@ class Transformer(hk.Module):
                 model_size=self._emb_dim,
                 w_init_scale=2 / self._num_layers
             )
+            ln2 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
             # Then the dense block.
             dense_block = hk.Sequential([
                 hk.Linear(2 * self._emb_dim, w_init=initializer),
                 jnn.gelu,
                 hk.Linear(self._emb_dim, w_init=initializer),
             ])
-
-            h_norm = layer_norm(h)
+            h_norm = ln1(h)
             h_attn = attn_block(h_norm, h_norm, h_norm)
             h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
             h = h + h_attn
-            h_norm = layer_norm(h)
+            h_norm = ln2(h)
             h_dense = dense_block(h_norm)
             h_dense = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_dense)
             h = h + h_dense
+            return h
+        h = embeddings
+        for i in range(self._num_layers):
+            h = trnsfrm_block(i, h)
 
-        return layer_norm(h)
+        return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h)
 
 
 def make_transformer(

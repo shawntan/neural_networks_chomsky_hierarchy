@@ -153,8 +153,7 @@ def loop(
                                             train_batch["output"])))
 
       print(log_data)
-      training_results.append(log_data)
-
+      training_results.append(log_data) 
   # params = pickle.load(open('current_checkpoint.jx', 'rb'))
   # print(params)
   # Evaluation over all lengths just after training.
