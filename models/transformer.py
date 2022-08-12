@@ -110,7 +110,7 @@ def _fixed_encodings_to_relative(encodings: jnp.ndarray) -> jnp.ndarray:
 
 
 def compute_attention_with_relative_encodings(queries: jnp.ndarray,
-                                              keys: jnp.ndarray) -> jnp.ndarray:
+                                              keys: jnp.ndarray, dropout=0.) -> jnp.ndarray:
     """Returns attention with relative positional encodings.
 
     This code strictly follows what is described in the TransformerXL paper.
@@ -140,6 +140,7 @@ def compute_attention_with_relative_encodings(queries: jnp.ndarray,
     sin_cos = sin_cos_positional_encodings(
         sequence_length, num_hiddens, with_negative=True)
     shifted_sin_cos = _fixed_encodings_to_relative(sin_cos)
+    shifted_sin_cos = hk.dropout(hk.next_rng_key(), dropout, shifted_sin_cos)
     relative_keys = hk.Linear(num_hiddens, name='k_params')(shifted_sin_cos)
     relative_logits = jnp.einsum('bthd,Ttd->bhtT', queries + relative_bias,
                                  relative_keys)  # No need to broadcast batch.

@@ -48,6 +48,7 @@ class MultiHeadAttention(hk.Module):
                  num_heads: int,
                  key_size: int,
                  w_init_scale: float,
+                 dropout: float = 0.,
                  value_size: Optional[int] = None,
                  model_size: Optional[int] = None,
                  name: Optional[str] = None):
@@ -57,6 +58,7 @@ class MultiHeadAttention(hk.Module):
         self.value_size = value_size or key_size
         self.model_size = model_size or key_size * num_heads
         self.w_init = hk.initializers.VarianceScaling(w_init_scale)
+        self.dropout = dropout
 
     def __call__(self, query: jnp.ndarray, key: jnp.ndarray, value: jnp.ndarray,
                  mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
@@ -67,7 +69,7 @@ class MultiHeadAttention(hk.Module):
 
         # attn_logits = jnp.einsum("...thd,...Thd->...htT", query_heads, key_heads)
         attn_logits = \
-            compute_attention_with_relative_encodings(query_heads, key_heads)
+            compute_attention_with_relative_encodings(query_heads, key_heads, self.dropout)
 
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
         attn_logits = attn_logits / sqrt_key_size
@@ -157,7 +159,8 @@ class Transformer(hk.Module):
             num_heads=self._num_heads,
             key_size=self._hiddens_per_head,
             model_size=self._emb_dim,
-            w_init_scale=2 / self._num_layers
+            w_init_scale=2 / self._num_layers,
+            dropout=self._dropout_prob
         )
         ln2 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
         # Then the dense block.
