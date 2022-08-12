@@ -66,7 +66,6 @@ class MultiHeadAttention(hk.Module):
         value_heads = self._linear_projection(value, self.value_size, "value")
 
         # attn_logits = jnp.einsum("...thd,...Thd->...htT", query_heads, key_heads)
-
         attn_logits = \
             compute_attention_with_relative_encodings(query_heads, key_heads)
 
@@ -154,7 +153,7 @@ class Transformer(hk.Module):
 
         ln1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
         # First the attention block.
-        attn_block = hk.MultiHeadAttention(
+        attn_block = MultiHeadAttention(
             num_heads=self._num_heads,
             key_size=self._hiddens_per_head,
             model_size=self._emb_dim,
@@ -213,5 +212,4 @@ def make_transformer(
         if not return_all_outputs:
             output = output[:, -1, :]
         return hk.Linear(output_size)(output)
-
     return transformer
