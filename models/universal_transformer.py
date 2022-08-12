@@ -167,9 +167,19 @@ class Transformer(hk.Module):
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
-        h = embeddings
+        def f_halt(h):
+            z = hk.Linear(2, w_init=initializer)(h)
+            return jnn.log_softmax(z, axis=-1)
 
-        def trnsfrm_block(i, h):
+        def update_halting_log_probs(log_g, log_acc_no_halt, log_acc_halt):
+            log_acc_no_halt = log_acc_no_halt + log_g[..., 0]
+            log_halt = log_acc_no_halt + log_g[..., 1]
+            log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
+            return log_acc_no_halt, log_acc_halt
+
+
+        def trnsfrm_block(i, state):
+            (h, log_acc_no_halt, log_acc_halt) = state
             h_norm = ln1(h)
             h_attn = attn_block(h_norm, h_norm, h_norm)
             h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
@@ -178,14 +188,20 @@ class Transformer(hk.Module):
             h_dense = dense_block(h_norm)
             h_dense = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_dense)
             h = h + h_dense
-            return h
+            log_acc_no_halt, log_acc_halt = update_halting_log_probs(
+                f_halt(h), log_acc_no_halt, log_acc_halt)
+            return h, log_acc_no_halt, log_acc_halt
+
+
+        h = embeddings
+        log_acc_no_halt = jnp.zeros_like(h[..., 0])
+        log_acc_halt = jnp.full_like(h[..., 0], -64.)
 
         if hk.running_init():
-            h = trnsfrm_block(0, h)
+            h = trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt))
         else:
-            # for _ in range(x.shape[1] ):
-            #     h = trnsfrm_block(h)
-            h = jax.lax.fori_loop(0, x.shape[1], trnsfrm_block, h)
+            h = jax.lax.fori_loop(0, x.shape[1], trnsfrm_block,
+                                  (h, log_acc_no_halt, log_acc_halt))
 
         return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h)
 
