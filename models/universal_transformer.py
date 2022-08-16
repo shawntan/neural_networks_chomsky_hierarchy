@@ -170,11 +170,12 @@ class Transformer(hk.Module):
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
-
         _f_halt = hk.Linear(2, w_init=initializer)
         def f_halt(h):
-            z = _f_halt(h)
+            z = _f_halt(h) + np.array([1., -1.])
             return jnn.log_softmax(z, axis=-1)
+
+        ln_out = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
 
         def update_halting_log_probs(log_g, log_acc_no_halt, log_acc_halt):
             log_acc_no_halt = log_acc_no_halt + log_g[..., 0]
@@ -187,8 +188,6 @@ class Transformer(hk.Module):
             log_halt = log_acc_no_halt
             log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
             return log_acc_no_halt, log_acc_halt, log_halt
-
-
 
         def trnsfrm_block(i, state):
             (h, log_acc_no_halt, log_acc_halt, h_out) = state
@@ -206,7 +205,7 @@ class Transformer(hk.Module):
             curr_h = h + h_dense
 
             log_acc_no_halt, log_acc_halt, log_halt = jax.lax.cond(
-                i + 1 == curr_h.shape[1],
+                i == (curr_h.shape[1] - 1),
                 last_update,
                 update_halting_log_probs,
                 f_halt(curr_h), log_acc_no_halt, log_acc_halt
@@ -214,7 +213,7 @@ class Transformer(hk.Module):
 
             h =  halted * prev_h + (1 - halted) * curr_h
             p_halt = jnp.exp(log_halt)[..., None]
-            h_out = h_out + p_halt * curr_h
+            h_out = h_out + p_halt * ln_out(curr_h)
             # print(jnp.exp(log_acc_halt[0]), log_acc_halt.shape)
             return h, log_acc_no_halt, log_acc_halt, h_out
 
@@ -223,6 +222,7 @@ class Transformer(hk.Module):
         h_out = jnp.zeros_like(h)
         log_acc_no_halt = jnp.zeros_like(h[..., 0])
         log_acc_halt = jnp.full_like(h[..., 0], -64.)
+
         if hk.running_init():
             h, log_acc_no_halt, log_acc_halt, h_out = \
                 trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt, h_out))
@@ -238,7 +238,7 @@ class Transformer(hk.Module):
                     h, log_acc_no_halt, log_acc_halt, h_out = \
                         trnsfrm_block(
                             i, (h, log_acc_no_halt, log_acc_halt, h_out))
-        return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h_out)
+        return h_out
 
 
 def make_transformer(
