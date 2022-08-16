@@ -178,14 +178,14 @@ class Transformer(hk.Module):
         ln_out = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
 
         def update_halting_log_probs(log_g, log_acc_no_halt, log_acc_halt):
-            log_acc_no_halt = log_acc_no_halt + log_g[..., 0]
             log_halt = log_acc_no_halt + log_g[..., 1]
+            log_acc_no_halt = log_acc_no_halt + log_g[..., 0]
             log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
             return log_acc_no_halt, log_acc_halt, log_halt
 
         def last_update(log_g, log_acc_no_halt, log_acc_halt):
-            log_acc_no_halt = log_acc_no_halt - 64.
             log_halt = log_acc_no_halt
+            log_acc_no_halt = log_acc_no_halt - 64.
             log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
             return log_acc_no_halt, log_acc_halt, log_halt
 
@@ -204,17 +204,18 @@ class Transformer(hk.Module):
             h_dense = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_dense)
             curr_h = h + h_dense
 
+            log_g = f_halt(curr_h)
             log_acc_no_halt, log_acc_halt, log_halt = jax.lax.cond(
-                i == (curr_h.shape[1] - 1),
-                last_update,
-                update_halting_log_probs,
-                f_halt(curr_h), log_acc_no_halt, log_acc_halt
+                i < (curr_h.shape[1] - 1),
+                update_halting_log_probs, last_update,
+                log_g, log_acc_no_halt, log_acc_halt
             )
+
+            # print(jnp.exp(log_acc_halt[0]), i < (curr_h.shape[1] - 1))
 
             h =  halted * prev_h + (1 - halted) * curr_h
             p_halt = jnp.exp(log_halt)[..., None]
             h_out = h_out + p_halt * ln_out(curr_h)
-            # print(jnp.exp(log_acc_halt[0]), log_acc_halt.shape)
             return h, log_acc_no_halt, log_acc_halt, h_out
 
 
