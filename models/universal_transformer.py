@@ -180,10 +180,22 @@ class Transformer(hk.Module):
             log_acc_no_halt = log_acc_no_halt + log_g[..., 0]
             log_halt = log_acc_no_halt + log_g[..., 1]
             log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
-            return log_acc_no_halt, log_acc_halt
+            return log_acc_no_halt, log_acc_halt, log_halt
+
+        def last_update(log_g, log_acc_no_halt, log_acc_halt):
+            log_acc_no_halt = log_acc_no_halt - 64.
+            log_halt = log_acc_no_halt
+            log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
+            return log_acc_no_halt, log_acc_halt, log_halt
+
+
 
         def trnsfrm_block(i, state):
-            (h, log_acc_no_halt, log_acc_halt) = state
+            (h, log_acc_no_halt, log_acc_halt, h_out) = state
+
+            halted = jnp.exp(log_acc_halt)[..., None]
+            prev_h = h
+
             h_norm = ln1(h)
             h_attn = attn_block(h_norm, h_norm, h_norm)
             h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
@@ -191,35 +203,42 @@ class Transformer(hk.Module):
             h_norm = ln2(h)
             h_dense = dense_block(h_norm)
             h_dense = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_dense)
-            h = h + h_dense
-            log_acc_no_halt, log_acc_halt = update_halting_log_probs(
-                f_halt(h), log_acc_no_halt, log_acc_halt)
-            return h, log_acc_no_halt, log_acc_halt
+            curr_h = h + h_dense
+
+            log_acc_no_halt, log_acc_halt, log_halt = jax.lax.cond(
+                i + 1 == curr_h.shape[1],
+                last_update,
+                update_halting_log_probs,
+                f_halt(curr_h), log_acc_no_halt, log_acc_halt
+            )
+
+            h =  halted * prev_h + (1 - halted) * curr_h
+            p_halt = jnp.exp(log_halt)[..., None]
+            h_out = h_out + p_halt * curr_h
+            # print(jnp.exp(log_acc_halt[0]), log_acc_halt.shape)
+            return h, log_acc_no_halt, log_acc_halt, h_out
 
 
         h = embeddings
+        h_out = jnp.zeros_like(h)
         log_acc_no_halt = jnp.zeros_like(h[..., 0])
         log_acc_halt = jnp.full_like(h[..., 0], -64.)
-
         if hk.running_init():
-            h, log_acc_no_halt, log_acc_halt = \
-                trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt))
+            h, log_acc_no_halt, log_acc_halt, h_out = \
+                trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt, h_out))
         else:
-            if False:
-                h, log_acc_no_halt, log_acc_halt = \
+            if True:
+                h, log_acc_no_halt, log_acc_halt, h_out = \
                     jax.lax.fori_loop(
-                        0, x.shape[1] - 1, trnsfrm_block,
-                        (h, log_acc_no_halt, log_acc_halt)
+                        0, x.shape[1], trnsfrm_block,
+                        (h, log_acc_no_halt, log_acc_halt, h_out)
                     )
             else:
-                for i in range(x.shape[1] - 1):
-                    h, log_acc_no_halt, log_acc_halt = \
-                        trnsfrm_block(i, (h, log_acc_no_halt, log_acc_halt))
-                    print(jnp.exp(log_acc_halt[0]))
-
-
-        print("end.")
-        return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h)
+                for i in range(x.shape[1]):
+                    h, log_acc_no_halt, log_acc_halt, h_out = \
+                        trnsfrm_block(
+                            i, (h, log_acc_no_halt, log_acc_halt, h_out))
+        return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h_out)
 
 
 def make_transformer(
