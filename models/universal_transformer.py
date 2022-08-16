@@ -170,8 +170,10 @@ class Transformer(hk.Module):
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
+
+        _f_halt = hk.Linear(2, w_init=initializer)
         def f_halt(h):
-            z = hk.Linear(2, w_init=initializer)(h)
+            z = _f_halt(h)
             return jnn.log_softmax(z, axis=-1)
 
         def update_halting_log_probs(log_g, log_acc_no_halt, log_acc_halt):
@@ -179,7 +181,6 @@ class Transformer(hk.Module):
             log_halt = log_acc_no_halt + log_g[..., 1]
             log_acc_halt = jnp.logaddexp(log_acc_halt, log_halt)
             return log_acc_no_halt, log_acc_halt
-
 
         def trnsfrm_block(i, state):
             (h, log_acc_no_halt, log_acc_halt) = state
@@ -201,11 +202,23 @@ class Transformer(hk.Module):
         log_acc_halt = jnp.full_like(h[..., 0], -64.)
 
         if hk.running_init():
-            h = trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt))
+            h, log_acc_no_halt, log_acc_halt = \
+                trnsfrm_block(0, (h, log_acc_no_halt, log_acc_halt))
         else:
-            h = jax.lax.fori_loop(0, x.shape[1], trnsfrm_block,
-                                  (h, log_acc_no_halt, log_acc_halt))
+            if False:
+                h, log_acc_no_halt, log_acc_halt = \
+                    jax.lax.fori_loop(
+                        0, x.shape[1] - 1, trnsfrm_block,
+                        (h, log_acc_no_halt, log_acc_halt)
+                    )
+            else:
+                for i in range(x.shape[1] - 1):
+                    h, log_acc_no_halt, log_acc_halt = \
+                        trnsfrm_block(i, (h, log_acc_no_halt, log_acc_halt))
+                    print(jnp.exp(log_acc_halt[0]))
 
+
+        print("end.")
         return hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)(h)
 
 
