@@ -63,13 +63,20 @@ class MultiHeadAttention(hk.Module):
     def __call__(self, query: jnp.ndarray, key: jnp.ndarray, value: jnp.ndarray,
                  mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         """Compute (optionally masked) MHA with queries, keys & values."""
-        query_heads = self._linear_projection(query, self.key_size, "query")
-        key_heads = self._linear_projection(key, self.key_size, "key")
-        value_heads = self._linear_projection(value, self.value_size, "value")
+        x = query
+        query_heads_fun = self._linear_projection(self.key_size, "query")
+        key_heads_fun = self._linear_projection(self.key_size, "key")
+        value_heads_fun = self._linear_projection(self.value_size, "value")
+        query_heads = query_heads_fun(query)
+        key_heads = key_heads_fun(key)
+        value_heads = value_heads_fun(value)
 
         # attn_logits = jnp.einsum("...thd,...Thd->...htT", query_heads, key_heads)
         attn_logits = \
-            compute_attention_with_relative_encodings(query_heads, key_heads, self.dropout)
+            compute_attention_with_relative_encodings(
+                x, query_heads, key_heads,
+                key_heads_fun, self.dropout
+            )
 
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
         attn_logits = attn_logits / sqrt_key_size
@@ -91,12 +98,11 @@ class MultiHeadAttention(hk.Module):
     @hk.transparent
     def _linear_projection(
             self,
-            x: jnp.ndarray,
             head_size: int,
             name: Optional[str] = None
     ) -> jnp.ndarray:
-        y = hk.Linear(self.num_heads * head_size, w_init=self.w_init, name=name)(x)
-        return y.reshape((*x.shape[:-1], self.num_heads, head_size))
+        f = hk.Linear(self.num_heads * head_size, w_init=self.w_init, name=name)
+        return lambda x: f(x).reshape((*x.shape[:-1], self.num_heads, head_size))
 
 
 class Transformer(hk.Module):
@@ -148,10 +154,14 @@ class Transformer(hk.Module):
     def __call__(self, x: jnp.ndarray, is_training: bool = True):
         """Returns the transformer tower output, shape [B, T, E]."""
         initializer = hk.initializers.VarianceScaling(2 / self._num_layers)
+        zeros = hk.initializers.Constant(0.)
         embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
         embeddings = hk.Linear(self._emb_dim, with_bias=False, w_init=embs_init)(x)
         batch_size, sequence_length , embedding_size = embeddings.shape
-        # embeddings += sin_cos_positional_encodings(sequence_length, embedding_size)
+
+        # embeddings += \
+        #     hk.dropout(hk.next_rng_key(), 0.25,
+        #         sin_cos_positional_encodings(sequence_length, embedding_size))
 
         ln1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
         # First the attention block.
@@ -170,9 +180,14 @@ class Transformer(hk.Module):
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
-        _f_halt = hk.Linear(2, w_init=initializer)
+        _f_halt = hk.Sequential([
+            hk.Linear(self._emb_dim, w_init=initializer),
+            jnn.tanh,
+            hk.Linear(2, w_init=zeros, with_bias=False)
+        ])
+
         def f_halt(h):
-            z = _f_halt(h) + np.array([1., -1.])
+            z = _f_halt(h) + np.array([2., -2.])
             return jnn.log_softmax(z, axis=-1)
 
         ln_out = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
@@ -210,8 +225,6 @@ class Transformer(hk.Module):
                 update_halting_log_probs, last_update,
                 log_g, log_acc_no_halt, log_acc_halt
             )
-
-            # print(jnp.exp(log_acc_halt[0]), i < (curr_h.shape[1] - 1))
 
             h =  halted * prev_h + (1 - halted) * curr_h
             p_halt = jnp.exp(log_halt)[..., None]

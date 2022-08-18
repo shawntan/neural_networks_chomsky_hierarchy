@@ -129,7 +129,7 @@ def loop(
       (valid_loss,
        valid_metrics) = training_params.loss_fn(valid_outputs,
                                                 valid_batch["output"])
-      pickle.dump(params, open('current_checkpoint.jx', 'wb'))
+      # pickle.dump(params, open('current_checkpoint.jx', 'wb'))
 
       log_data = {
           "train_loss": float(train_loss),
@@ -155,8 +155,8 @@ def loop(
 
       print(log_data)
       training_results.append(log_data) 
-  # params = pickle.load(open('current_checkpoint.jx', 'rb'))
-  # print(params)
+  params = pickle.load(open('current_checkpoint.jx', 'rb'))
+  print(params)
   # Evaluation over all lengths just after training.
   evaluation_results = None
   if training_params.compute_full_range_test:

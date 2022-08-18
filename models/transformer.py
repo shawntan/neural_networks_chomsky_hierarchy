@@ -109,8 +109,10 @@ def _fixed_encodings_to_relative(encodings: jnp.ndarray) -> jnp.ndarray:
     return jnp.reshape(shifted, (sequence_length, sequence_length, num_hiddens))
 
 
-def compute_attention_with_relative_encodings(queries: jnp.ndarray,
-                                              keys: jnp.ndarray, dropout=0.) -> jnp.ndarray:
+def compute_attention_with_relative_encodings(x,
+                                              queries: jnp.ndarray,
+                                              keys: jnp.ndarray,
+                                              key_heads_fun, dropout=0.) -> jnp.ndarray:
     """Returns attention with relative positional encodings.
 
     This code strictly follows what is described in the TransformerXL paper.
@@ -123,14 +125,15 @@ def compute_attention_with_relative_encodings(queries: jnp.ndarray,
     Returns:
       The attention logits. Shape (b, h, t, t).
     """
-    sequence_length, num_heads, num_hiddens = queries.shape[-3:]
+    sequence_length, num_heads, _ = queries.shape[-3:]
+    num_hiddens = x.shape[-1]
 
     # First compute the content logits.
     content_bias = hk.get_parameter(
         name='relpos_contentbias',
         shape=[num_heads, num_hiddens],
         init=hk.initializers.RandomNormal(stddev=0.02))
-    content_logits = jnp.einsum('bthd,bThd->bhtT', queries + content_bias, keys)
+    content_logits = jnp.einsum('bthd,bThd->bhtT', queries, keys)
 
     # Then compute the relative part.
     relative_bias = hk.get_parameter(
@@ -141,9 +144,8 @@ def compute_attention_with_relative_encodings(queries: jnp.ndarray,
         sequence_length, num_hiddens, with_negative=True)
     shifted_sin_cos = _fixed_encodings_to_relative(sin_cos)
     shifted_sin_cos = hk.dropout(hk.next_rng_key(), dropout, shifted_sin_cos)
-    relative_keys = hk.Linear(num_hiddens, name='k_params')(shifted_sin_cos)
-    relative_logits = jnp.einsum('bthd,Ttd->bhtT', queries + relative_bias,
-                                 relative_keys)  # No need to broadcast batch.
+    relative_keys = key_heads_fun(shifted_sin_cos)
+    relative_logits = jnp.einsum('bthd,Tthd->bhtT', queries, relative_keys)
     return content_logits + relative_logits
 
 
@@ -274,9 +276,7 @@ class Transformer(hk.Module):
         embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
         embeddings = hk.Linear(self._emb_dim, with_bias=False, w_init=embs_init)(x)
         batch_size, sequence_length , embedding_size = embeddings.shape
-        # embeddings += sin_cos_positional_encodings(sequence_length, embedding_size)
-
-
+        embeddings += sin_cos_positional_encodings(sequence_length, embedding_size)
 
         def trnsfrm_block(i, h):
             ln1 = hk.LayerNorm(axis=-1, create_scale=True, create_offset=True)
