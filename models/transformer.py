@@ -73,6 +73,7 @@ def sin_cos_positional_encodings(sequence_length: int,
     return jnp.concatenate([jnp.sin(pos_emb), jnp.cos(pos_emb)], -1)
 
 
+
 def _fixed_encodings_to_relative(encodings: jnp.ndarray) -> jnp.ndarray:
     """Returns a matrix of shifted encodings.
 
@@ -127,26 +128,31 @@ def compute_attention_with_relative_encodings(x,
     """
     sequence_length, num_heads, _ = queries.shape[-3:]
     num_hiddens = x.shape[-1]
-
     # First compute the content logits.
-    content_bias = hk.get_parameter(
-        name='relpos_contentbias',
-        shape=[num_heads, num_hiddens],
-        init=hk.initializers.RandomNormal(stddev=0.02))
-    content_logits = jnp.einsum('bthd,bThd->bhtT', queries, keys)
-
+    # content_bias = hk.get_parameter(
+    #     name='relpos_contentbias',
+    #     shape=[num_heads, num_hiddens],
+    #     init=hk.initializers.RandomNormal(stddev=0.02))
     # Then compute the relative part.
-    relative_bias = hk.get_parameter(
-        name='relpos_relativebias',
-        shape=[num_heads, num_hiddens],
-        init=hk.initializers.RandomNormal(stddev=0.02))
+    # relative_bias = hk.get_parameter(
+    #     name='relpos_relativebias',
+    #     shape=[num_heads, num_hiddens],
+    #     init=hk.initializers.RandomNormal(stddev=0.02))
+    content_logits = jnp.einsum('bthd,bThd->bhtT', queries, keys)
     sin_cos = sin_cos_positional_encodings(
         sequence_length, num_hiddens, with_negative=True)
-    shifted_sin_cos = _fixed_encodings_to_relative(sin_cos)
-    shifted_sin_cos = hk.dropout(hk.next_rng_key(), dropout, shifted_sin_cos)
-    relative_keys = key_heads_fun(shifted_sin_cos)
+    sin_cos = hk.dropout(hk.next_rng_key(), dropout, sin_cos)
+    proj_sin_cos = key_heads_fun(sin_cos)
+    relative_keys = to_relative_window(sequence_length, proj_sin_cos)
+    # shifted_sin_cos = _fixed_encodings_to_relative(proj_sin_cos)
     relative_logits = jnp.einsum('bthd,Tthd->bhtT', queries, relative_keys)
     return content_logits + relative_logits
+
+def to_relative_window(sequence_length, pos_emb):
+    centre = pos_emb.shape[0] // 2
+    idxs = jnp.arange(sequence_length)
+    rel_pos = (idxs[None, :] - idxs[:, None]) + centre
+    return pos_emb[rel_pos]
 
 
 def compute_alibi_encodings_biases(
