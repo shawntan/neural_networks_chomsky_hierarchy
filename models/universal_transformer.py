@@ -206,12 +206,11 @@ class Transformer(hk.Module):
 
         def trnsfrm_block(i, state):
             (h, log_acc_no_halt, log_acc_halt, h_out) = state
-
             halted = jnp.exp(log_acc_halt)[..., None]
+
             prev_h = h
 
-            h_norm = ln1(h)
-            h_attn = attn_block(h_norm, h_norm, h_norm)
+            h_attn = attn_block(h, h, h)
             h_attn = hk.dropout(hk.next_rng_key(), self._dropout_prob, h_attn)
             h = h + h_attn
             h_norm = ln2(h)
@@ -225,14 +224,15 @@ class Transformer(hk.Module):
                 update_halting_log_probs, last_update,
                 log_g, log_acc_no_halt, log_acc_halt
             )
+            curr_h = ln_out(curr_h)
 
             h =  halted * prev_h + (1 - halted) * curr_h
             p_halt = jnp.exp(log_halt)[..., None]
-            h_out = h_out + p_halt * ln_out(curr_h)
+            h_out = h_out + p_halt * curr_h
+
             return h, log_acc_no_halt, log_acc_halt, h_out
 
-
-        h = embeddings
+        h = ln_out(embeddings)
         h_out = jnp.zeros_like(h)
         log_acc_no_halt = jnp.zeros_like(h[..., 0])
         log_acc_halt = jnp.full_like(h[..., 0], -64.)

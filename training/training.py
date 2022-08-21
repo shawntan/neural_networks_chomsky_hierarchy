@@ -78,7 +78,7 @@ def loop(
   model = training_params.model
 
   apply_fn = jax.jit(model.apply)
-  # apply_fn = model.apply
+  apply_fn = model.apply
   training_dataset = training_params.training_dataset()
   validation_dataset = training_params.validation_dataset()
 
@@ -123,13 +123,13 @@ def loop(
     )
 
     eval_freq = training_params.eval_frequency
-    if eval_freq > 0 and step % eval_freq == 0:
+    if eval_freq > 0 and (step + 1) % eval_freq == 0:
       valid_batch = next(validation_dataset)
       valid_outputs = apply_fn(params, next(rng_seq), valid_batch["input"])
       (valid_loss,
        valid_metrics) = training_params.loss_fn(valid_outputs,
                                                 valid_batch["output"])
-      # pickle.dump(params, open('current_checkpoint.jx', 'wb'))
+      pickle.dump(params, open('current_checkpoint.jx', 'wb'))
 
       log_data = {
           "train_loss": float(train_loss),
@@ -154,9 +154,9 @@ def loop(
                                             train_batch["output"])))
 
       print(log_data)
-      training_results.append(log_data) 
+      training_results.append(log_data)
   params = pickle.load(open('current_checkpoint.jx', 'rb'))
-  print(params)
+  # print(params)
   # Evaluation over all lengths just after training.
   evaluation_results = None
   if training_params.compute_full_range_test:
