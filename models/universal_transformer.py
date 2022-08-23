@@ -27,9 +27,60 @@ import numpy as np
 from .transformer import \
         compute_attention_with_relative_encodings, \
         sin_cos_positional_encodings
-from .transformer import PositionalEncodings
+from .transformer import PositionalEncodings, to_relative_window
 
 _INF_LOGITS = 10000
+
+
+def parameterised_relpos_attention(
+    x, queries: jnp.ndarray, keys: jnp.ndarray,
+    key_heads_fun, dropout=0., window=1) -> jnp.ndarray:
+    """Returns attention with relative positional encodings.
+
+    This code strictly follows what is described in the TransformerXL paper.
+    https://arxiv.org/pdf/1901.02860.pdf
+
+    Args:
+      queries: The queries used for attention. Shape (b, t, h, d).
+      keys: The keys used for attention. Shape (b, t, h, d').
+
+    Returns:
+      The attention logits. Shape (b, h, t, t).
+    """
+    sequence_length, num_heads, num_head_hid = queries.shape[-3:]
+    num_hiddens = x.shape[-1]
+
+    content_bias = hk.get_parameter(
+        name='relpos_contentbias',
+        shape=[num_heads, num_head_hid],
+        init=hk.initializers.RandomNormal(stddev=0.02)
+    )
+    relative_bias = hk.get_parameter(
+        name='relpos_relativebias',
+        shape=[num_heads, num_head_hid],
+        init=hk.initializers.RandomNormal(stddev=0.02)
+    )
+    pos_emb = hk.get_parameter(
+        name='relpos_emb',
+        shape=[2 * (window + 1) + 1, num_hiddens],
+        init=hk.initializers.RandomNormal(stddev=0.02)
+    )
+    content_logits = jnp.einsum('bthd,bThd->bhtT', queries + content_bias, keys)
+
+    idxs = jnp.arange(sequence_length)
+    rel_pos = idxs[None, :] - idxs[:, None]
+    rel_pos = jax.lax.clamp(-(window + 1), rel_pos, window + 1)
+    rel_emb = pos_emb[rel_pos]
+    # jax.numpy.set_printoptions(3)
+    # print(rel_emb[:, :, 0])
+    rel_emb = hk.dropout(hk.next_rng_key(), dropout, rel_emb)
+
+    relative_keys = key_heads_fun(rel_emb)
+    relative_logits = jnp.einsum('bthd,Tthd->bhtT',
+                                 queries + relative_bias, relative_keys)
+    return content_logits + relative_logits
+
+
 
 
 def layer_norm():
@@ -63,21 +114,23 @@ class MultiHeadAttention(hk.Module):
     def __call__(self, query: jnp.ndarray, key: jnp.ndarray, value: jnp.ndarray,
                  mask: Optional[jnp.ndarray] = None) -> jnp.ndarray:
         """Compute (optionally masked) MHA with queries, keys & values."""
+
         x = query
+
         query_heads_fun = self._linear_projection(self.key_size, "query")
         key_heads_fun = self._linear_projection(self.key_size, "key")
         value_heads_fun = self._linear_projection(self.value_size, "value")
+
         query_heads = query_heads_fun(query)
         key_heads = key_heads_fun(key)
         value_heads = value_heads_fun(value)
 
         # attn_logits = jnp.einsum("...thd,...Thd->...htT", query_heads, key_heads)
         attn_logits = \
-            compute_attention_with_relative_encodings(
+            parameterised_relpos_attention(
                 x, query_heads, key_heads,
-                key_heads_fun, self.dropout
+                key_heads_fun, self.dropout, window=1
             )
-
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
         attn_logits = attn_logits / sqrt_key_size
 
@@ -176,7 +229,7 @@ class Transformer(hk.Module):
         # Then the dense block.
         dense_block = hk.Sequential([
             hk.Linear(2 * self._emb_dim, w_init=initializer),
-            jnn.gelu,
+            jnn.relu,
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
@@ -205,6 +258,7 @@ class Transformer(hk.Module):
             return log_acc_no_halt, log_acc_halt, log_halt
 
         def trnsfrm_block(i, state):
+            # print(i)
             (h, log_acc_no_halt, log_acc_halt, h_out) = state
             halted = jnp.exp(log_acc_halt)[..., None]
 
@@ -226,12 +280,13 @@ class Transformer(hk.Module):
             )
             curr_h = ln_out(curr_h)
 
-            h =  halted * prev_h + (1 - halted) * curr_h
+            # h =  halted * prev_h + (1 - halted) * curr_h
+            h = curr_h
             p_halt = jnp.exp(log_halt)[..., None]
-            h_out = h_out + p_halt * curr_h
+            # h_out = h_out + p_halt * curr_h
+            h_out = curr_h
 
             return h, log_acc_no_halt, log_acc_halt, h_out
-
         h = ln_out(embeddings)
         h_out = jnp.zeros_like(h)
         log_acc_no_halt = jnp.zeros_like(h[..., 0])

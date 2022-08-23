@@ -148,9 +148,9 @@ def compute_attention_with_relative_encodings(x,
                                 queries + content_bias, keys)
     sin_cos = sin_cos_positional_encodings(
         sequence_length, num_hiddens, with_negative=True)
+    sin_cos = hk.dropout(hk.next_rng_key(), dropout, sin_cos)
     rel_sin_cos = to_relative_window(sequence_length, sin_cos)
     # rel_sin_cos = _fixed_encodings_to_relative(sin_cos)
-    rel_sin_cos = hk.dropout(hk.next_rng_key(), dropout, rel_sin_cos)
     relative_keys = key_heads_fun(rel_sin_cos)
     # shifted_sin_cos = _fixed_encodings_to_relative(proj_sin_cos)
     relative_logits = jnp.einsum('bthd,Tthd->bhtT',

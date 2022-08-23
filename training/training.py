@@ -77,8 +77,8 @@ def loop(
   training_results = []
   model = training_params.model
 
+  # apply_fn = model.apply
   apply_fn = jax.jit(model.apply)
-  apply_fn = model.apply
   training_dataset = training_params.training_dataset()
   validation_dataset = training_params.validation_dataset()
 
@@ -129,7 +129,7 @@ def loop(
       (valid_loss,
        valid_metrics) = training_params.loss_fn(valid_outputs,
                                                 valid_batch["output"])
-      pickle.dump(params, open('current_checkpoint.jx', 'wb'))
+      # pickle.dump(params, open('current_checkpoint.jx', 'wb'))
 
       log_data = {
           "train_loss": float(train_loss),
