@@ -129,7 +129,7 @@ def loop(
       (valid_loss,
        valid_metrics) = training_params.loss_fn(valid_outputs,
                                                 valid_batch["output"])
-      # pickle.dump(params, open('current_checkpoint.jx', 'wb'))
+      pickle.dump(params, open('current_checkpoint.jx', 'wb'))
 
       log_data = {
           "train_loss": float(train_loss),

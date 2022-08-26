@@ -34,7 +34,7 @@ _INF_LOGITS = 10000
 
 def parameterised_relpos_attention(
     x, queries: jnp.ndarray, keys: jnp.ndarray,
-    key_heads_fun, dropout=0., window=1) -> jnp.ndarray:
+    key_heads_fun, dropout=0., window=2) -> jnp.ndarray:
     """Returns attention with relative positional encodings.
 
     This code strictly follows what is described in the TransformerXL paper.
@@ -129,7 +129,7 @@ class MultiHeadAttention(hk.Module):
         attn_logits = \
             parameterised_relpos_attention(
                 x, query_heads, key_heads,
-                key_heads_fun, self.dropout, window=1
+                key_heads_fun, self.dropout, window=2
             )
         sqrt_key_size = np.sqrt(self.key_size).astype(key.dtype)
         attn_logits = attn_logits / sqrt_key_size
@@ -209,7 +209,15 @@ class Transformer(hk.Module):
         initializer = hk.initializers.VarianceScaling(2 / self._num_layers)
         zeros = hk.initializers.Constant(0.)
         embs_init = hk.initializers.TruncatedNormal(stddev=self._emb_init_scale)
+
         embeddings = hk.Linear(self._emb_dim, with_bias=False, w_init=embs_init)(x)
+        # Tack on eos token
+        eos_emb = hk.get_parameter(name='eos_emb', shape=[self._emb_dim],
+                                   init=embs_init)
+        eos_emb = eos_emb[None, None, :].repeat(embeddings.shape[0], axis=0)
+        embeddings = jnp.concatenate([embeddings, eos_emb], axis=1)
+
+
         batch_size, sequence_length , embedding_size = embeddings.shape
 
         # embeddings += \
@@ -280,13 +288,16 @@ class Transformer(hk.Module):
             )
             curr_h = ln_out(curr_h)
 
-            # h =  halted * prev_h + (1 - halted) * curr_h
-            h = curr_h
-            p_halt = jnp.exp(log_halt)[..., None]
-            # h_out = h_out + p_halt * curr_h
-            h_out = curr_h
+            if True:
+                h = curr_h
+                h_out = curr_h
+            else:
+                h =  halted * prev_h + (1 - halted) * curr_h
+                p_halt = jnp.exp(log_halt)[..., None]
+                h_out = h_out + p_halt * curr_h
 
             return h, log_acc_no_halt, log_acc_halt, h_out
+
         h = ln_out(embeddings)
         h_out = jnp.zeros_like(h)
         log_acc_no_halt = jnp.zeros_like(h[..., 0])
@@ -331,5 +342,9 @@ def make_transformer(
             x, is_training=is_training)
         if not return_all_outputs:
             output = output[:, -1, :]
-        return hk.Linear(output_size)(output)
+        return hk.Sequential([
+            hk.Linear(embedding_dim, w_init=hk.initializers.VarianceScaling(2 / 5)),
+            jnn.tanh,
+            hk.Linear(output_size, w_init=hk.initializers.Constant(0.)),
+        ])(output)
     return transformer
