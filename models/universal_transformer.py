@@ -288,7 +288,7 @@ class Transformer(hk.Module):
             )
             curr_h = ln_out(curr_h)
 
-            if True:
+            if False:
                 h = curr_h
                 h_out = curr_h
             else:
