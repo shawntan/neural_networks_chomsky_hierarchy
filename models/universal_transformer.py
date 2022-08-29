@@ -237,7 +237,7 @@ class Transformer(hk.Module):
         # Then the dense block.
         dense_block = hk.Sequential([
             hk.Linear(2 * self._emb_dim, w_init=initializer),
-            jnn.relu,
+            jnn.gelu,
             hk.Linear(self._emb_dim, w_init=initializer),
         ])
 
@@ -310,7 +310,7 @@ class Transformer(hk.Module):
             if True:
                 h, log_acc_no_halt, log_acc_halt, h_out = \
                     jax.lax.fori_loop(
-                        0, x.shape[1], trnsfrm_block,
+                        0, x.shape[1] - 1, trnsfrm_block,
                         (h, log_acc_no_halt, log_acc_halt, h_out)
                     )
             else:
